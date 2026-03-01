@@ -1,0 +1,154 @@
+# Kelly OS --- Calendar Buffer Architecture
+
+**Session Summary** Date: 2026-03-01
+
+------------------------------------------------------------------------
+
+## 1. Objective
+
+Build a privacy-safe architecture that allows OpenClaw to understand
+Kelly's schedule without exposing her real Google Calendar details.
+
+Core goal: - Protect primary calendar - Provide structured, abstracted
+signals to AI - Maintain control and auditability
+
+------------------------------------------------------------------------
+
+## 2. High-Level Architecture
+
+### 🔒 Main Calendar (kellyoconor@gmail.com)
+
+-   Sacred source of truth
+-   Never directly shared with OpenClaw
+-   Shared read-only to Shelly account only
+
+### 🐚 Shelly Account (shellykelly19103@gmail.com)
+
+Acts as a sandbox buffer layer.
+
+Contains: - OAuth credentials - GitHub automation token - Dedicated
+buffer calendar
+
+### 🧱 Shelly Buffer Calendar
+
+-   Separate calendar created inside Shelly Gmail
+-   Only receives sanitized, abstracted copies
+-   This is what OpenClaw will access
+
+------------------------------------------------------------------------
+
+## 3. GitHub Automation Layer
+
+### Repository
+
+`shelly-calendar-buffer`
+
+### Workflow
+
+`.github/workflows/calendar-buffer-sync.yml`
+
+Runs: - Every 6 hours - Or manually via workflow_dispatch
+
+------------------------------------------------------------------------
+
+## 4. Sync Logic Overview
+
+File: `sync.mjs`
+
+Key behaviors:
+
+-   Auth via OAuth2 refresh token
+-   Reads events from main calendar (via Shelly access)
+-   Only syncs future events (LOOKAHEAD_DAYS = 45)
+-   Writes to TARGET_CALENDAR_ID (Shelly Buffer)
+-   Upsert logic (no duplicates)
+-   Private visibility
+-   No description/location/attendees copied
+
+------------------------------------------------------------------------
+
+## 5. Smart Categorization Layer
+
+Events are abstracted into emoji-coded categories:
+
+-   🌅 Workout · duration
+-   🌙 Workout · duration
+-   ⚡ Workout · duration
+-   🧠 Meetings · duration
+-   🧠 Deep Work · duration
+-   🍷 Social · duration
+-   🍷 Weekend Social · duration
+-   ✈ Travel · duration
+-   🩺 Health · duration
+-   💁🏼‍♀️ Personal · duration
+
+Duration examples: - · 45m - · 2h - · All Day
+
+No real titles ever exposed.
+
+------------------------------------------------------------------------
+
+## 6. Security Decisions Made
+
+-   No ICS private link sharing
+-   No direct main calendar OAuth to OpenClaw
+-   Burner account isolation
+-   Dedicated buffer calendar
+-   Future-only sync window
+-   Manual monthly audit reminder
+-   Upsert instead of insert (no runaway duplication)
+-   Limited Google scopes
+
+------------------------------------------------------------------------
+
+## 7. Automation Cadence
+
+Cron schedule:
+
+`0 */6 * * *`
+
+Runs every 6 hours.
+
+Low frequency chosen intentionally because: - Personal calendar - Not
+time-sensitive - Reduces API calls - Lower surface area
+
+------------------------------------------------------------------------
+
+## 8. Data Exposure Model
+
+OpenClaw will see: - Category - Duration - Time block
+
+OpenClaw will NOT see: - Event titles - Notes - Locations - Attendees -
+Sensitive details
+
+Details can be selectively provided manually when desired.
+
+------------------------------------------------------------------------
+
+## 9. System Properties
+
+This architecture now has:
+
+-   Separation of concerns
+-   Privacy firewall
+-   AI-safe signal layer
+-   Controlled abstraction
+-   Token-based automation
+-   No duplicate pollution
+-   Low operational overhead
+
+------------------------------------------------------------------------
+
+## 10. Philosophical Outcome
+
+You did not "connect your calendar to AI."
+
+You built:
+
+A privacy middleware layer between your life and machine intelligence.
+
+This is Kelly OS.
+
+------------------------------------------------------------------------
+
+End of session summary.
