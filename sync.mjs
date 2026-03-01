@@ -4,119 +4,138 @@ const {
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
   GOOGLE_REFRESH_TOKEN,
-  SOURCE_CALENDAR_ID,
-  SOURCE_CALENDAR_NAME,
-  LOOKAHEAD_DAYS = "30",
-  SYNC_WINDOW_DAYS_PAST = "7",
-  SANITIZE_MODE = "busy",
+  SOURCE_CALENDAR_NAME
 } = process.env;
 
-function requireEnv(name, value) {
-  if (!value) throw new Error(`Missing required env var: ${name}`);
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN || !SOURCE_CALENDAR_NAME) {
+  throw new Error("Missing required environment variables.");
 }
 
-function isoDaysFromNow(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString();
-}
+const oauth2Client = new google.auth.OAuth2(
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET
+);
 
-function sanitizeTitle(srcEvent) {
-  if (SANITIZE_MODE === "busy") return "Busy";
-  const text = `${srcEvent.summary || ""} ${srcEvent.description || ""}`.toLowerCase();
-  if (/(run|workout|gym|yoga|pilates|spin)/.test(text)) return "Workout";
-  if (/(flight|airport|train|hotel|travel)/.test(text)) return "Travel";
-  if (/(dinner|date|drinks|brunch|party)/.test(text)) return "Social";
-  if (/(dentist|doctor|pt|therapy|appointment)/.test(text)) return "Health";
-  if (/(work|meeting|sync|review|interview)/.test(text)) return "Work";
+oauth2Client.setCredentials({
+  refresh_token: GOOGLE_REFRESH_TOKEN
+});
+
+const calendar = google.calendar({
+  version: "v3",
+  auth: oauth2Client
+});
+
+function categorize(title = "") {
+  const text = title.toLowerCase();
+
+  if (text.includes("run") || text.includes("workout") || text.includes("gym")) {
+    return "Workout";
+  }
+  if (text.includes("flight") || text.includes("travel") || text.includes("airport")) {
+    return "Travel";
+  }
+  if (text.includes("dinner") || text.includes("drinks") || text.includes("party")) {
+    return "Social";
+  }
+  if (text.includes("doctor") || text.includes("dentist")) {
+    return "Health";
+  }
+  if (text.includes("meeting") || text.includes("call")) {
+    return "Work";
+  }
+
   return "Personal";
 }
 
-function sanitizedEventBody(srcEvent) {
-  return {
-    summary: `[BUF] ${sanitizeTitle(srcEvent)}`,
-    start: srcEvent.start,
-    end: srcEvent.end,
-    visibility: "private",
-    description: "",
-    location: "",
-    attendees: [],
-    reminders: { useDefault: false },
-    extendedProperties: {
-      private: { sourceEventId: srcEvent.id }
-    }
-  };
-}
+async function resolveSourceCalendarId() {
+  const res = await calendar.calendarList.list();
+  const calendars = res.data.items || [];
 
-async function getAuthClient() {
-  requireEnv("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID);
-  requireEnv("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET);
-  requireEnv("GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN);
-
-  const oauth2Client = new google.auth.OAuth2(
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET
-  );
-  oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
-  return oauth2Client;
-}
-
-async function resolveSourceCalendarId(calendar) {
-  if (SOURCE_CALENDAR_ID) return SOURCE_CALENDAR_ID;
-  requireEnv("SOURCE_CALENDAR_NAME", SOURCE_CALENDAR_NAME);
-
-  const list = await calendar.calendarList.list({ maxResults: 250 });
-  const match = (list.data.items || []).find((c) =>
-    (c.summary || "").toLowerCase().includes(SOURCE_CALENDAR_NAME.toLowerCase())
+  const match = calendars.find(
+    c => c.summary === SOURCE_CALENDAR_NAME
   );
 
-  if (!match?.id) {
-    const summaries = (list.data.items || [])
-      .map((c) => `- ${c.summary} (${c.id})`)
-      .join("\n");
-    throw new Error(
-      `Could not find calendar matching SOURCE_CALENDAR_NAME="${SOURCE_CALENDAR_NAME}".\n` +
-      `Calendars visible to Shelly:\n${summaries}`
-    );
+  if (!match) {
+    console.log("Calendars visible to Shelly:");
+    calendars.forEach(c => console.log(`- ${c.summary} (${c.id})`));
+    throw new Error(`Could not find calendar matching SOURCE_CALENDAR_NAME="${SOURCE_CALENDAR_NAME}"`);
   }
 
   console.log(`Resolved source calendar: ${match.summary} -> ${match.id}`);
   return match.id;
 }
 
-async function main() {
-  const auth = await getAuthClient();
-  const calendar = google.calendar({ version: "v3", auth });
-
-  const timeMin = isoDaysFromNow(-parseInt(SYNC_WINDOW_DAYS_PAST, 10));
-  const timeMax = isoDaysFromNow(parseInt(LOOKAHEAD_DAYS, 10));
-
-  const sourceCalId = await resolveSourceCalendarId(calendar);
-
-  const resp = await calendar.events.list({
-    calendarId: sourceCalId,
-    timeMin,
-    timeMax,
-    singleEvents: true,
-    orderBy: "startTime",
-    maxResults: 2500
+async function getExistingBufferEvents() {
+  const res = await calendar.events.list({
+    calendarId: "primary",
+    maxResults: 2500,
+    singleEvents: true
   });
 
-  const sourceEvents = (resp.data.items || []).filter(e => e.status !== "cancelled");
+  const events = res.data.items || [];
 
-  for (const e of sourceEvents) {
-    if (!e.start || !e.end) continue;
+  const map = new Map();
 
-    await calendar.events.insert({
-      calendarId: "primary",
-      requestBody: sanitizedEventBody(e)
-    });
+  for (const ev of events) {
+    if (ev.extendedProperties?.private?.sourceEventId) {
+      map.set(ev.extendedProperties.private.sourceEventId, ev);
+    }
   }
 
-  console.log(`Synced ${sourceEvents.length} events.`);
+  return map;
 }
 
-main().catch((err) => {
-  console.error(err?.stack || err);
-  process.exit(1);
-});
+async function sync() {
+  const sourceCalendarId = await resolveSourceCalendarId();
+
+  const sourceEventsRes = await calendar.events.list({
+    calendarId: sourceCalendarId,
+    maxResults: 2500,
+    singleEvents: true
+  });
+
+  const sourceEvents = sourceEventsRes.data.items || [];
+  const existingMap = await getExistingBufferEvents();
+
+  let created = 0;
+  let updated = 0;
+
+  for (const src of sourceEvents) {
+    if (!src.start || !src.end) continue;
+
+    const category = categorize(src.summary || "");
+
+    const bufferEvent = {
+      summary: `[BUF] ${category}`,
+      start: src.start,
+      end: src.end,
+      extendedProperties: {
+        private: {
+          sourceEventId: src.id
+        }
+      }
+    };
+
+    const existing = existingMap.get(src.id);
+
+    if (existing) {
+      await calendar.events.update({
+        calendarId: "primary",
+        eventId: existing.id,
+        requestBody: bufferEvent
+      });
+      updated++;
+    } else {
+      await calendar.events.insert({
+        calendarId: "primary",
+        requestBody: bufferEvent
+      });
+      created++;
+    }
+  }
+
+  console.log(`Created ${created} events.`);
+  console.log(`Updated ${updated} events.`);
+}
+
+await sync();
