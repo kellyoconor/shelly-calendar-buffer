@@ -3,25 +3,30 @@ name: calendar-buffer-sync
 on:
   workflow_dispatch:
   schedule:
-  - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"   # every 6 hours
 
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - run: npm install
+      - name: Install dependencies
+        run: npm install
 
-      - run: node sync.mjs
+      - name: Run calendar sync
+        run: node sync.mjs
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           SOURCE_CALENDAR_NAME: ${{ secrets.SOURCE_CALENDAR_NAME }}
-TARGET_CALENDAR_ID: ${{ secrets.TARGET_CALENDAR_ID }}
+          TARGET_CALENDAR_ID: ${{ secrets.TARGET_CALENDAR_ID }}
+          LOOKAHEAD_DAYS: "45"
