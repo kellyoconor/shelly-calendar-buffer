@@ -8,33 +8,80 @@ const {
   LOOKAHEAD_DAYS = "45"
 } = process.env;
 
-function requireEnv(name, value) {
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN || !SOURCE_CALENDAR_NAME) {
+  throw new Error("Missing required environment variables.");
 }
-
-requireEnv("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID);
-requireEnv("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET);
-requireEnv("GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN);
-requireEnv("SOURCE_CALENDAR_NAME", SOURCE_CALENDAR_NAME);
 
 const oauth2Client = new google.auth.OAuth2(
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET
 );
+
 oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
 
-const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+const calendar = google.calendar({
+  version: "v3",
+  auth: oauth2Client
+});
 
-function categorize(title = "") {
-  const t = title.toLowerCase();
+function minutesBetween(start, end) {
+  return Math.round((new Date(end) - new Date(start)) / 60000);
+}
 
-  if (/(run|workout|gym|yoga|pilates|spin|lift|pt)/.test(t)) return "Workout";
-  if (/(flight|airport|train|hotel|travel|uber|lyft)/.test(t)) return "Travel";
-  if (/(dinner|drinks|date|brunch|happy hour|party)/.test(t)) return "Social";
-  if (/(doctor|dentist|ortho|therapy|appointment)/.test(t)) return "Health";
-  if (/(meeting|call|sync|1:1|review|interview|work)/.test(t)) return "Work";
+function formatDuration(minutes, isAllDay) {
+  if (isAllDay) return "All Day";
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
-  return "Personal";
+function categorize(event) {
+  const title = (event.summary || "").toLowerCase();
+  const start = new Date(event.start.dateTime || event.start.date);
+  const end = new Date(event.end.dateTime || event.end.date);
+
+  const isAllDay = !!event.start.date;
+  const duration = minutesBetween(start, end);
+  const day = start.getDay(); // 0 Sunday, 6 Saturday
+  const hour = start.getHours();
+
+  const durationLabel = ` · ${formatDuration(duration, isAllDay)}`;
+
+  // ⚡ Workout
+  if (/(run|workout|gym|yoga|pilates|spin|lift|pt)/.test(title)) {
+    if (hour < 9) return `🌅 Workout${durationLabel}`;
+    if (hour >= 17) return `🌙 Workout${durationLabel}`;
+    return `⚡ Workout${durationLabel}`;
+  }
+
+  // ✈ Travel
+  if (/(flight|airport|train|hotel|travel|uber|lyft)/.test(title)) {
+    return `✈ Travel${durationLabel}`;
+  }
+
+  // 🍷 Social
+  if (/(dinner|drinks|date|brunch|happy hour|party)/.test(title)) {
+    if (day === 0 || day === 6) {
+      return `🍷 Weekend Social${durationLabel}`;
+    }
+    return `🍷 Social${durationLabel}`;
+  }
+
+  // 🩺 Health
+  if (/(doctor|dentist|ortho|therapy|appointment)/.test(title)) {
+    return `🩺 Health${durationLabel}`;
+  }
+
+  // 🧠 Work
+  if (/(meeting|call|sync|1:1|review|interview)/.test(title)) {
+    return `🧠 Meetings${durationLabel}`;
+  }
+
+  if (day >= 1 && day <= 5 && duration >= 120 && hour >= 9 && hour <= 17) {
+    return `🧠 Deep Work${durationLabel}`;
+  }
+
+  return `🌿 Personal${durationLabel}`;
 }
 
 function isoDaysFromNow(days) {
@@ -52,19 +99,14 @@ async function resolveSourceCalendarId() {
   );
 
   if (!match) {
-    console.log("Calendars visible to Shelly:");
     calendars.forEach((c) => console.log(`- ${c.summary} (${c.id})`));
-    throw new Error(
-      `Could not find calendar matching SOURCE_CALENDAR_NAME="${SOURCE_CALENDAR_NAME}"`
-    );
+    throw new Error(`Could not find calendar matching SOURCE_CALENDAR_NAME`);
   }
 
-  console.log(`Resolved source calendar: ${match.summary} -> ${match.id}`);
   return match.id;
 }
 
 async function getExistingBufferEvents(timeMin, timeMax) {
-  // Only fetch existing buffer events in the window (fast)
   const res = await calendar.events.list({
     calendarId: "primary",
     timeMin,
@@ -77,19 +119,14 @@ async function getExistingBufferEvents(timeMin, timeMax) {
   const map = new Map();
   for (const ev of res.data.items || []) {
     const sourceId = ev.extendedProperties?.private?.sourceEventId;
-    const summary = ev.summary || "";
-    if (sourceId && summary.startsWith("[BUF]")) {
-      map.set(sourceId, ev);
-    }
+    if (sourceId) map.set(sourceId, ev);
   }
   return map;
 }
 
 function buildBufferEvent(src) {
-  const category = categorize(src.summary || "");
-
   return {
-    summary: `[BUF] ${category}`,
+    summary: categorize(src),
     start: src.start,
     end: src.end,
     visibility: "private",
@@ -103,40 +140,12 @@ function buildBufferEvent(src) {
   };
 }
 
-function needsUpdate(existing, desired) {
-  // Compare only what we control
-  const a = {
-    summary: existing.summary || "",
-    start: JSON.stringify(existing.start || {}),
-    end: JSON.stringify(existing.end || {}),
-    visibility: existing.visibility || "",
-    sourceEventId: existing.extendedProperties?.private?.sourceEventId || ""
-  };
-
-  const b = {
-    summary: desired.summary || "",
-    start: JSON.stringify(desired.start || {}),
-    end: JSON.stringify(desired.end || {}),
-    visibility: desired.visibility || "",
-    sourceEventId: desired.extendedProperties?.private?.sourceEventId || ""
-  };
-
-  return (
-    a.summary !== b.summary ||
-    a.start !== b.start ||
-    a.end !== b.end ||
-    a.visibility !== b.visibility ||
-    a.sourceEventId !== b.sourceEventId
-  );
-}
-
 async function main() {
   const sourceCalendarId = await resolveSourceCalendarId();
 
   const timeMin = new Date().toISOString();
   const timeMax = isoDaysFromNow(parseInt(LOOKAHEAD_DAYS, 10));
 
-  // Pull source events ONLY in the window
   const sourceRes = await calendar.events.list({
     calendarId: sourceCalendarId,
     timeMin,
@@ -169,7 +178,11 @@ async function main() {
       continue;
     }
 
-    if (needsUpdate(existing, desired)) {
+    if (
+      existing.summary !== desired.summary ||
+      JSON.stringify(existing.start) !== JSON.stringify(desired.start) ||
+      JSON.stringify(existing.end) !== JSON.stringify(desired.end)
+    ) {
       await calendar.events.patch({
         calendarId: "primary",
         eventId: existing.id,
@@ -181,9 +194,7 @@ async function main() {
     }
   }
 
-  console.log(
-    `Done. window=${LOOKAHEAD_DAYS}d created=${created} updated=${updated} unchanged=${unchanged} source=${sourceEvents.length}`
-  );
+  console.log(`Done. created=${created} updated=${updated} unchanged=${unchanged}`);
 }
 
 await main();
